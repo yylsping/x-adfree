@@ -1,0 +1,38 @@
+# Gradle and Android Studio
+.gradle/
+**/build/
+.idea/
+*.iml
+local.properties
+.android-sdk/
+.externalNativeBuild/
+**/.cxx/
+
+# Signing material and local secrets
+.env
+.env.*
+!.env.example
+keystore.properties
+!keystore.properties.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+
+# Local release artifacts
+*.apk
+*.aab
+*-source.zip
+dist/
+commandlinetools-*.zip
+
+# Internal analysis and handoff material
+/.analysis/
+/handoff.md
+x_initial.png
+
+# OS files
+.DS_Store
+Thumbs.db

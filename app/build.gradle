@@ -1,0 +1,38 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "io.github.local.xadfree"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "io.github.local.xadfree"
+        minSdk 28
+        targetSdk 35
+        versionCode 17
+        versionName "1.5.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        resources {
+            merges += "META-INF/xposed/*"
+        }
+    }
+}
+
+dependencies {
+    compileOnly "io.github.libxposed:api:102.0.0"
+    testImplementation "junit:junit:4.13.2"
+}

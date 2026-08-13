@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">X AdFree</string>
+    <string name="xposed_description">X 去广告：去除时间线和评论区广告（适配 X 12.3.1-release.0）</string>
+</resources>
