@@ -38,15 +38,17 @@ The module has no settings screen. Its enabled state, scope, and inline-hook res
 The project requires JDK 17 and Android SDK 35. Gradle must be able to download `io.github.libxposed:api:102.0.0` from Maven Central.
 
 ```powershell
-.\gradlew.bat :app:testDebugUnitTest :app:assembleDebug
+.\gradlew.bat :app:testDebugUnitTest :app:assembleRelease
 ```
 
-Build artifacts are written to `app/build/outputs/apk/`. Before a production release, generate and sign a release APK with a dedicated signing key stored outside the repository.
+The maintainer's production builds use a project-specific release key stored locally in:
 
-## Related projects
+- `signing-private/release.p12`
+- `signing-private/signing.properties`
 
-- [bili hook](https://github.com/yylsping/bili-hook): quality unlocking and ad removal for Bilibili Android 7.4.0.
-- [Coolapk Purifier](https://github.com/yylsping/coolapk-purifier): ad removal for the Coolapk Android app.
+Both files are excluded by `.gitignore` and are never committed to GitHub. When the local signing configuration exists, `assembleRelease` produces a signed release APK. Repository clones without the private key can still use `assembleDebug` for test builds.
+
+The release key is required for Android in-place updates. Keep an encrypted backup of the complete `signing-private/` directory, and never delete, regenerate, or commit it. Earlier APKs used a test signature, so users must uninstall the previous build once when switching to this release key. Later production releases can then be installed as normal updates.
 
 ## License
 
