@@ -38,17 +38,10 @@ X 11.82.0 之后包含 `libpairipcore.so`。使用本模块前，需要在官方
 需要 JDK 17、Android SDK 35，并可从 Maven Central 获取 `io.github.libxposed:api:102.0.0`。
 
 ```powershell
-.\gradlew.bat :app:testDebugUnitTest :app:assembleRelease
+.\gradlew.bat :app:testDebugUnitTest :app:assembleDebug
 ```
 
-维护者本地的正式构建使用本项目专属发布密钥：
-
-- 密钥：`signing-private/release.p12`
-- 凭据：`signing-private/signing.properties`
-
-这两个文件均已被 `.gitignore` 排除，不会提交到 GitHub。存在本地签名配置时，`assembleRelease` 会直接生成正式签名 APK；没有私钥的仓库克隆仍可使用 `assembleDebug` 生成测试包。
-
-发布密钥决定 Android 能否覆盖升级。请加密备份整个 `signing-private/` 目录，切勿删除、重新生成或提交其中内容。由于本项目此前的 APK 使用测试签名，首次切换到该发布密钥时需要先卸载旧版；此后的正式版本可以直接覆盖升级。
+测试 APK 输出到 `app/build/outputs/apk/debug/`。面向普通用户的已签名版本请从 GitHub Releases 下载。
 
 ## 许可证
 
