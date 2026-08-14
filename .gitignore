@@ -33,6 +33,7 @@ commandlinetools-*.zip
 /.analysis/
 /handoff.md
 x_initial.png
+/XPOSED_UPDATE.md
 
 # OS files
 .DS_Store
