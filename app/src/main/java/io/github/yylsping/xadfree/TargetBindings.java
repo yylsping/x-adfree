@@ -1,4 +1,4 @@
-package io.github.local.xadfree;
+package io.github.yylsping.xadfree;
 
 import android.view.View;
 

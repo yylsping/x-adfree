@@ -18,7 +18,7 @@
 | 目标应用 | X 12.3.1-release.0（versionCode 312031000） |
 | Android | 9.0（API 28）及以上 |
 | 框架 | 支持 libxposed Modern API 102 的官方 LSPosed |
-| 模块版本 | 1.5.0（versionCode 17） |
+| 模块版本 | 1.5.1（versionCode 18） |
 
 模块依赖 X 的内部类名、方法签名和资源 ID，不保证兼容其他版本。
 

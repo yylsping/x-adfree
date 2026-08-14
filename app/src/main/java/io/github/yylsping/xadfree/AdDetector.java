@@ -1,4 +1,4 @@
-package io.github.local.xadfree;
+package io.github.yylsping.xadfree;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;

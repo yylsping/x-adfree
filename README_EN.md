@@ -18,7 +18,7 @@ An LSPosed ad-removal module for the X Android app, built with libxposed Modern 
 | Target app | X 12.3.1-release.0 (versionCode 312031000) |
 | Android | Android 9.0 (API 28) or later |
 | Framework | Official LSPosed with libxposed Modern API 102 support |
-| Module version | 1.5.0 (versionCode 17) |
+| Module version | 1.5.1 (versionCode 18) |
 
 The module depends on internal class names, method signatures, and resource IDs from the target app. Compatibility with other X versions is not guaranteed.
 

@@ -1,4 +1,4 @@
-package io.github.local.xadfree;
+package io.github.yylsping.xadfree;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
