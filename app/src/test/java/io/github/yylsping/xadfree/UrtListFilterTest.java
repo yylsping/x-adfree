@@ -63,6 +63,32 @@ public final class UrtListFilterTest {
         assertEquals(0, errors.get());
     }
 
+    @Test
+    public void unknownVerdictsPassThrough() {
+        Throwing throwing = new Throwing();
+        PlainEntry last = new PlainEntry("tweet-2");
+        List<?> input = Arrays.asList(throwing, new PromotedEntry(), last);
+
+        // The UNKNOWN entry must survive; only the confirmed AD is removed.
+        List<?> result = filter.filter(input);
+
+        assertEquals(Arrays.asList(throwing, last), result);
+    }
+
+    @Test
+    public void triStateVerdictsForDirectDetection() {
+        assertEquals(AdDetector.Verdict.AD,
+                detector.detect(new PromotedEntry()).verdict);
+        assertEquals(AdDetector.Verdict.NOT_AD,
+                detector.detect(new PlainEntry("tweet-1")).verdict);
+    }
+
+    public static final class Throwing {
+        public Object getPromotedMetadata() {
+            throw new IllegalStateException("broken");
+        }
+    }
+
     public static final class PlainEntry {
         private final String entryId;
 

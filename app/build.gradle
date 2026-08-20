@@ -18,8 +18,8 @@ android {
         applicationId "io.github.yylsping.xadfree"
         minSdk 28
         targetSdk 35
-        versionCode 18
-        versionName "1.5.1"
+        versionCode 19
+        versionName "2.0.0"
     }
 
     signingConfigs {
@@ -38,6 +38,7 @@ android {
         release {
             minifyEnabled false
             signingConfig signingPropertiesFile.isFile() ? signingConfigs.release : null
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
     }
 
@@ -47,13 +48,29 @@ android {
     }
 
     packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
         resources {
             merges += "META-INF/xposed/*"
         }
+    }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
     }
 }
 
 dependencies {
     compileOnly "io.github.libxposed:api:102.0.0"
+    // DexKit query APIs reference Kotlin types (Function1/Unit) in their
+    // signatures; javac only needs the stdlib on the compile classpath.
+    compileOnly "org.jetbrains.kotlin:kotlin-stdlib:1.5.0"
+    implementation "org.luckypray:dexkit:2.0.6"
+    testImplementation "io.github.libxposed:api:102.0.0"
     testImplementation "junit:junit:4.13.2"
+    // Real org.json for unit tests: the android.jar stub returns defaults
+    // (null) from JSONObject methods, which would silently break every
+    // cache serialization test.
+    testImplementation "org.json:json:20240303"
 }

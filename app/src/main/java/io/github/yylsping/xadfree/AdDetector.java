@@ -6,57 +6,164 @@ import java.util.IdentityHashMap;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicLong;
 
-/** Detects promoted URT models without repeating reflection lookups for every item. */
+/**
+ * Tri-state advertisement detection for URT entry objects.
+ *
+ * <p>Detection is semantic, never name-based alone: promoted metadata accessors,
+ * promoted entry-id prefixes, nested event-summary/trend/module promoted
+ * metadata, and (when resolved) the app's own isAd predicate all contribute
+ * score. Class-name tokens only ever add a bonus that cannot reach the AD
+ * threshold by itself. Reflection failures on expected accessors yield
+ * UNKNOWN, and UNKNOWN content is always passed through (fail-open).
+ */
 final class AdDetector {
+    enum Verdict { AD, NOT_AD, UNKNOWN }
+
+    static final class DetectionResult {
+        final Verdict verdict;
+        final int score;
+        final String evidence;
+
+        DetectionResult(Verdict verdict, int score, String evidence) {
+            this.verdict = verdict;
+            this.score = score;
+            this.evidence = evidence;
+        }
+    }
+
     interface ErrorReporter {
         void report(Class<?> modelClass, Throwable error);
     }
 
     private static final int MAX_NESTING_DEPTH = 8;
+    private static final int AD_THRESHOLD = 40;
     private static final Boolean PRESENT = Boolean.TRUE;
 
     private final ConcurrentMap<Class<?>, InspectionPlan> plans = new ConcurrentHashMap<>();
     private final ErrorReporter errorReporter;
+    private final AtomicLong inspectedCount = new AtomicLong();
+    private final AtomicLong adCount = new AtomicLong();
+
+    /** The app's own static isAd(modelInterface) predicate, when resolved. */
+    private volatile Method appIsAd;
+
+    /** Optional shape check: elements may implement the model interface. */
+    private volatile Class<?> modelInterface;
 
     AdDetector(ErrorReporter errorReporter) {
         this.errorReporter = errorReporter;
     }
 
+    void setAppIsAd(Method method) {
+        this.appIsAd = method;
+    }
+
+    void setModelInterface(Class<?> type) {
+        this.modelInterface = type;
+    }
+
+    DetectionResult detect(Object entry) {
+        DetectionResult result = inspect(entry, 0, null);
+        if (result.verdict == Verdict.AD) {
+            adCount.incrementAndGet();
+        }
+        return result;
+    }
+
+    /** @deprecated tri-state replacement kept for call-site compatibility. */
+    @Deprecated
     boolean isAdvertisement(Object entry) {
-        return inspect(entry, 0, null);
+        return detect(entry).verdict == Verdict.AD;
+    }
+
+    long inspectedCount() {
+        return inspectedCount.get();
+    }
+
+    long adCount() {
+        return adCount.get();
     }
 
     int cachedPlanCount() {
         return plans.size();
     }
 
-    private boolean inspect(
-            Object entry,
-            int depth,
-            IdentityHashMap<Object, Boolean> ancestors) {
+    /** Shared plan lookup for witnesses that need accessor shapes. */
+    InspectionPlan planOf(Class<?> type) {
+        return planFor(type);
+    }
+
+    boolean looksLikeModelType(Class<?> type) {
+        Class<?> model = modelInterface;
+        return model != null && model.isAssignableFrom(type);
+    }
+
+    private DetectionResult inspect(Object entry, int depth,
+                                    IdentityHashMap<Object, Boolean> ancestors) {
         if (entry == null || depth > MAX_NESTING_DEPTH) {
-            return false;
+            return new DetectionResult(Verdict.NOT_AD, 0, "nullOrTooDeep");
         }
+        inspectedCount.incrementAndGet();
 
         InspectionPlan plan = planFor(entry.getClass());
+        int score = 0;
+        StringBuilder evidence = new StringBuilder();
+        boolean reflectionFailed = false;
+
+        // Strong: the app's own predicate.
+        Method isAd = appIsAd;
+        if (isAd != null) {
+            try {
+                Object verdict = isAd.invoke(null, entry);
+                if (Boolean.TRUE.equals(verdict)) {
+                    score += 45;
+                    evidence.append("|appIsAd");
+                }
+            } catch (Throwable error) {
+                reflectionFailed = true;
+                reportOnce(entry.getClass(), error);
+            }
+        }
+
+        // Strong: direct promoted metadata.
         try {
             if (invoke(plan.promotedMetadata, entry) != null) {
-                return true;
+                score += 45;
+                evidence.append("|promotedMetadata");
             }
+        } catch (Throwable error) {
+            reflectionFailed = true;
+            reportOnce(entry.getClass(), error);
+        }
 
+        // Strong: nested event summary / trend promoted metadata.
+        try {
             Object eventSummary = invoke(plan.eventSummary, entry);
-            if (eventSummary != null
-                    && invoke(planFor(eventSummary.getClass()).promotedMetadata, eventSummary) != null) {
-                return true;
+            if (eventSummary != null && invoke(
+                    planFor(eventSummary.getClass()).promotedMetadata, eventSummary) != null) {
+                score += 45;
+                evidence.append("|eventSummaryPromoted");
             }
-
+        } catch (Throwable error) {
+            reflectionFailed = true;
+            reportOnce(entry.getClass(), error);
+        }
+        try {
             Object trend = invoke(plan.timelineTrend, entry);
-            if (trend != null
-                    && invoke(planFor(trend.getClass()).promotedMetadata, trend) != null) {
-                return true;
+            if (trend != null && invoke(
+                    planFor(trend.getClass()).promotedMetadata, trend) != null) {
+                score += 45;
+                evidence.append("|timelineTrendPromoted");
             }
+        } catch (Throwable error) {
+            reflectionFailed = true;
+            reportOnce(entry.getClass(), error);
+        }
 
+        // Strong: promoted item nested inside a module.
+        try {
             Object items = invoke(plan.items, entry);
             if (items instanceof Iterable<?>) {
                 IdentityHashMap<Object, Boolean> visited = ancestors;
@@ -64,32 +171,63 @@ final class AdDetector {
                     visited = new IdentityHashMap<>();
                 }
                 if (visited.put(entry, PRESENT) != null) {
-                    return false;
+                    return new DetectionResult(Verdict.NOT_AD, 0, "cycleGuard");
                 }
                 try {
                     for (Object moduleItem : (Iterable<?>) items) {
                         if (moduleItem == null) {
                             continue;
                         }
-                        Object nested = invoke(planFor(moduleItem.getClass()).item, moduleItem);
-                        if (nested != null && inspect(nested, depth + 1, visited)) {
-                            return true;
+                        Object nested = invoke(
+                                planFor(moduleItem.getClass()).item, moduleItem);
+                        if (nested != null) {
+                            DetectionResult nestedResult = inspect(nested, depth + 1, visited);
+                            if (nestedResult.verdict == Verdict.AD) {
+                                score += 45;
+                                evidence.append("|moduleItemPromoted");
+                                break;
+                            }
                         }
                     }
                 } finally {
                     visited.remove(entry);
                 }
             }
-
-            if (plan.promotedTypeName) {
-                return true;
-            }
-
-            Object entryId = invoke(plan.entryId, entry);
-            return entryId != null && isPromotedEntryId(entryId.toString());
         } catch (Throwable error) {
-            errorReporter.report(entry.getClass(), unwrap(error));
-            return false;
+            reflectionFailed = true;
+            reportOnce(entry.getClass(), error);
+        }
+
+        // Weak bonus only: promoted-flavored type name. Never decisive alone.
+        if (plan.promotedTypeName) {
+            score += 15;
+            evidence.append("|classNameToken");
+        }
+
+        // Strong: promoted entry-id prefix.
+        try {
+            Object entryId = invoke(plan.entryId, entry);
+            if (entryId != null && isPromotedEntryId(entryId.toString())) {
+                score += 40;
+                evidence.append("|entryIdPromoted");
+            }
+        } catch (Throwable error) {
+            reflectionFailed = true;
+            reportOnce(entry.getClass(), error);
+        }
+
+        if (score >= AD_THRESHOLD) {
+            return new DetectionResult(Verdict.AD, score, trim(evidence));
+        }
+        if (reflectionFailed && plan.hasAccessor) {
+            return new DetectionResult(Verdict.UNKNOWN, score, trim(evidence) + "|reflectionFailed");
+        }
+        return new DetectionResult(Verdict.NOT_AD, score, trim(evidence));
+    }
+
+    private void reportOnce(Class<?> modelClass, Throwable error) {
+        if (errorReporter != null) {
+            errorReporter.report(modelClass, unwrap(error));
         }
     }
 
@@ -101,6 +239,10 @@ final class AdDetector {
         InspectionPlan created = new InspectionPlan(type);
         InspectionPlan raced = plans.putIfAbsent(type, created);
         return raced != null ? raced : created;
+    }
+
+    private static String trim(StringBuilder evidence) {
+        return evidence.length() == 0 ? "none" : evidence.substring(1);
     }
 
     private static Object invoke(Method method, Object target) throws ReflectiveOperationException {
@@ -115,7 +257,7 @@ final class AdDetector {
         return error;
     }
 
-    private static boolean isPromotedEntryId(String id) {
+    static boolean isPromotedEntryId(String id) {
         return containsIgnoreCase(id, "promoted-")
                 || containsIgnoreCase(id, "promoted_tweet")
                 || containsIgnoreCase(id, "promotedtweet")
@@ -138,7 +280,8 @@ final class AdDetector {
                 && value.regionMatches(true, 0, prefix, 0, prefix.length());
     }
 
-    private static final class InspectionPlan {
+    /** Cached reflective accessors per runtime model class. */
+    static final class InspectionPlan {
         final Method promotedMetadata;
         final Method eventSummary;
         final Method timelineTrend;
@@ -146,6 +289,7 @@ final class AdDetector {
         final Method item;
         final Method entryId;
         final boolean promotedTypeName;
+        final boolean hasAccessor;
 
         InspectionPlan(Class<?> type) {
             promotedMetadata = findPublicNoArg(type, "getPromotedMetadata");
@@ -157,9 +301,12 @@ final class AdDetector {
             String className = type.getName().toLowerCase(Locale.ROOT);
             promotedTypeName = className.contains("rtbimagead")
                     || className.contains("promotedcontent");
+            hasAccessor = promotedMetadata != null || eventSummary != null
+                    || timelineTrend != null || items != null || item != null
+                    || entryId != null;
         }
 
-        private static Method findPublicNoArg(Class<?> type, String name) {
+        static Method findPublicNoArg(Class<?> type, String name) {
             try {
                 Method method = type.getMethod(name);
                 method.setAccessible(true);
