@@ -13,7 +13,6 @@ import io.github.libxposed.api.XposedModule;
  */
 public final class XAdFreeModule extends XposedModule {
     static final String TARGET_PACKAGE = "com.twitter.android";
-    private static final String TAG = "XAdFree";
 
     private boolean targetProcess;
     private boolean started;
@@ -39,9 +38,8 @@ public final class XAdFreeModule extends XposedModule {
         log.info("bootstrap moduleLoaded target=" + TARGET_PACKAGE
                 + " mode=dexkit-dynamic-resolution");
         try {
-            HookCoordinator coordinator = new HookCoordinator(
-                    this, log, TARGET_PACKAGE, param.getClassLoader());
-            coordinator.install();
+            HookCoordinator.forProduction(this, log, TARGET_PACKAGE, param.getClassLoader())
+                    .install();
         } catch (Throwable error) {
             log.error("bootstrap coordinator install failed", error);
         }

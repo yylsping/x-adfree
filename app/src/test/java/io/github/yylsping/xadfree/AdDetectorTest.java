@@ -120,16 +120,6 @@ public final class AdDetectorTest {
     }
 
     @Test
-    public void appIsAdPredicateContributesStrongEvidence() throws Exception {
-        java.lang.reflect.Method appIsAd = AppPredicate.class.getDeclaredMethod(
-                "isAd", Object.class);
-        detector.setAppIsAd(appIsAd);
-
-        assertEquals(AdDetector.Verdict.AD, detect(new EntryWithId("tweet-1")));
-        assertEquals(AdDetector.Verdict.NOT_AD, detect(new EntryWithId("tweet-2")));
-    }
-
-    @Test
     public void modelInterfaceShapeCheckWorks() {
         detector.setModelInterface(ModelShape.class);
         assertTrue(detector.looksLikeModelType(ShapedEntry.class));
@@ -153,6 +143,116 @@ public final class AdDetectorTest {
         assertNotNull(plan.promotedMetadata);
         assertEquals(null, plan.entryId);
         assertTrue(plan.hasAccessor);
+    }
+
+    // ------------------------------------------------------------------
+    // App-helper semantic safety (P0-3)
+    // ------------------------------------------------------------------
+
+    @Test
+    public void wrongBooleanHelperCannotIndependentlyDelete() throws Exception {
+        // The helper claims tweet-1 is an ad; nothing else supports that.
+        // Unverified weight (20) stays below the AD threshold (40), so the
+        // entry must survive a mis-resolved helper.
+        java.lang.reflect.Method wrongHelper = WrongPredicate.class.getDeclaredMethod(
+                "isAd", Object.class);
+        detector.setAppIsAd(wrongHelper);
+
+        assertEquals(AdDetector.HelperWitnessState.UNVERIFIED, detector.helperWitnessState());
+        assertEquals(AdDetector.Verdict.NOT_AD, detect(new EntryWithId("tweet-1")));
+    }
+
+    @Test
+    public void unverifiedHelperStillSupportsRealEvidence() throws Exception {
+        // Promoted metadata (45) alone already deletes; the unverified helper
+        // never pushes a NOT_AD-lookalike over the line.
+        java.lang.reflect.Method wrongHelper = WrongPredicate.class.getDeclaredMethod(
+                "isAd", Object.class);
+        detector.setAppIsAd(wrongHelper);
+
+        assertEquals(AdDetector.Verdict.NOT_AD, detect(new EntryWithId("tweet-9")));
+    }
+
+    @Test
+    public void semanticWitnessVerifiesAndUnlocksFullWeight() throws Exception {
+        final List<String> events = Collections.synchronizedList(new java.util.ArrayList<>());
+        AdDetector witnessed = new AdDetector(
+                (modelClass, error) -> { },
+                new AdDetector.AdHelperWitnessListener() {
+                    @Override
+                    public void onAdHelperVerified(String evidenceSummary) {
+                        events.add("verified");
+                    }
+
+                    @Override
+                    public void onAdHelperDisabled(String reason) {
+                        events.add("disabled");
+                    }
+                });
+        java.lang.reflect.Method goodHelper = PromotedOnlyPredicate.class.getDeclaredMethod(
+                "isAd", Object.class);
+        witnessed.setAppIsAd(goodHelper);
+
+        // One agreement-positive plus enough agreement-negatives to reach the
+        // sample minimum.
+        assertEquals(AdDetector.Verdict.AD, witnessed.detect(new PromotedEntry()).verdict);
+        for (int i = 0; i < AdDetector.HELPER_MIN_SAMPLES; i++) {
+            assertEquals(AdDetector.Verdict.NOT_AD,
+                    witnessed.detect(new EntryWithId("tweet-" + i)).verdict);
+        }
+
+        assertEquals(AdDetector.HelperWitnessState.VERIFIED, witnessed.helperWitnessState());
+        assertEquals(Collections.singletonList("verified"), events);
+
+        // Verified weight (45) now matches the old semantics: a helper-only
+        // positive is deletable — but only after runtime verification.
+        assertEquals(AdDetector.Verdict.AD,
+                witnessed.detect(new HelperOnlyPositive()).verdict);
+    }
+
+    @Test
+    public void semanticContradictionDisablesHelper() throws Exception {
+        final List<String> events = Collections.synchronizedList(new java.util.ArrayList<>());
+        AdDetector witnessed = new AdDetector(
+                (modelClass, error) -> { },
+                new AdDetector.AdHelperWitnessListener() {
+                    @Override
+                    public void onAdHelperVerified(String evidenceSummary) {
+                        events.add("verified");
+                    }
+
+                    @Override
+                    public void onAdHelperDisabled(String reason) {
+                        events.add("disabled");
+                    }
+                });
+        java.lang.reflect.Method wrongHelper = WrongPredicate.class.getDeclaredMethod(
+                "isAd", Object.class);
+        witnessed.setAppIsAd(wrongHelper);
+
+        // Contradiction 1: helper says ad, evidence says normal content.
+        assertEquals(AdDetector.Verdict.NOT_AD, witnessed.detect(new EntryWithId("tweet-1")).verdict);
+        assertEquals(AdDetector.HelperWitnessState.UNVERIFIED, witnessed.helperWitnessState());
+        // Contradiction 2 crosses the tolerance limit.
+        assertEquals(AdDetector.Verdict.NOT_AD, witnessed.detect(new EntryWithId("tweet-1")).verdict);
+
+        assertEquals(AdDetector.HelperWitnessState.DISABLED, witnessed.helperWitnessState());
+        assertEquals(Collections.singletonList("disabled"), events);
+        // After disable, the helper contributes nothing at all.
+        assertEquals(AdDetector.Verdict.NOT_AD,
+                witnessed.detect(new EntryWithId("tweet-1")).verdict);
+    }
+
+    @Test
+    public void setAppIsAdResetsWitnessCounters() throws Exception {
+        java.lang.reflect.Method helper = PromotedOnlyPredicate.class.getDeclaredMethod(
+                "isAd", Object.class);
+        detector.setAppIsAd(helper);
+        detector.detect(new PromotedEntry());
+
+        detector.setAppIsAd(null);
+
+        assertEquals(AdDetector.HelperWitnessState.ABSENT, detector.helperWitnessState());
     }
 
     // ------------------------------------------------------------------
@@ -244,10 +344,25 @@ public final class AdDetectorTest {
         }
     }
 
-    public static final class AppPredicate {
+    /** Mis-resolved helper: flags a normal entry as ad. */
+    public static final class WrongPredicate {
         public static boolean isAd(Object entry) {
             return entry instanceof EntryWithId
                     && "tweet-1".equals(((EntryWithId) entry).getEntryId());
+        }
+    }
+
+    /** Correct helper: only flags entries with real promoted evidence. */
+    public static final class PromotedOnlyPredicate {
+        public static boolean isAd(Object entry) {
+            return entry instanceof PromotedEntry || entry instanceof HelperOnlyPositive;
+        }
+    }
+
+    /** No independent evidence; only the (verified) helper can flag it. */
+    public static final class HelperOnlyPositive {
+        public String getEntryId() {
+            return "tweet-100";
         }
     }
 

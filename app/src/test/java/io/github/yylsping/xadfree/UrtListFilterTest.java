@@ -50,13 +50,13 @@ public final class UrtListFilterTest {
         ModuleEntry module = new ModuleEntry(
                 Collections.singletonList(new ModuleItem(new PlainEntry("promoted-tweet"))));
 
-        assertTrue(detector.isAdvertisement(module));
+        assertEquals(AdDetector.Verdict.AD, detector.detect(module).verdict);
     }
 
     @Test
     public void missingMethodsAreNegativelyCachedPerClass() {
         for (int index = 0; index < 100; index++) {
-            assertFalse(detector.isAdvertisement(new Object()));
+            assertEquals(AdDetector.Verdict.NOT_AD, detector.detect(new Object()).verdict);
         }
 
         assertEquals(1, detector.cachedPlanCount());

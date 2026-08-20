@@ -99,44 +99,99 @@ getTimelineTrend/getItems/getItem/getEntryId）**原样保留可继续使用**�
   根本不会被创建。[VERIFIED_LATEST]
 
 因此本次改造：**URT 数据过滤是唯一安装的 Hook 层**；binder/badge 不再 Hook
-（架构保留扩展点），CollapsedViewRegistry 保留供未来 UI 层目标复用。
+（架构保留扩展点）。2.0.1 起原为未来 UI 层保留的 CollapsedViewRegistry 已删除
+（死代码清理，P3-2）。
 
 ### 5. 哪些目标必须 runtime witness，哪些能仅靠静态 DexKit 唯一确认？
 
 | 目标 | 静态可否唯一确认 | witness 策略 |
 |---|---|---|
-| urt_emit（强指纹：双字符串 + CPS 形状 + FlowCollector 接口） | 可以（字符串唯一性极高） | 仍要求**安装后首次真实调用见证**：arg0 必须为 List 且元素呈 URT entry 形状（有 entryId/或实现 UrtTimelineItem）；连续 3 次形状不符 → 自卸载并失效该缓存条目 |
-| urt_emit（弱指纹兜底命中，或多候选且前两名分差 <10） | 不可以 | 临时 probe hook 前 N(≤5) 个候选，首个通过真实调用见证者晋升，其余立即 unhook；30s 无见证 → fail-open 不 Hook |
+| urt_emit（强指纹：双字符串 + CPS 形状 + 接口 override 结构证明） | 可以（字符串唯一性极高） | 仍要求**安装后首次真实调用见证**：arg0 必须为 List 且元素呈 URT entry 形状（有 entryId/或实现 UrtTimelineItem）；连续 3 次形状不符 → **真实 unhook** 并失效该缓存条目（P1-3） |
+| urt_emit（弱指纹兜底命中，或多候选且前两名分差 <10） | 不可以 | 临时 probe hook 前 N(≤5) 个候选；**单一弱样本不晋升**（P1-8）：需 ≥2 次非空调用且被检元素形状占比 ≥0.5 才 CONFIRMED；首个 CONFIRMED 者晋升，其余立即 unhook；30s 无见证 → fail-open 不 Hook |
 | model.urtItemInterface | 可以（未混淆语义名 + 接口形状） | 免 witness，加载即验证 |
-| model.adHelperIsAd | 基本可以（双静态方法形状组 + 未混淆参数/返回类型） | 反射调用一次空值容错验证即可（不传业务对象） |
+| model.adHelperIsAd | 形状可以（双静态方法形状组），**语义不可以** | 形状验证（缓存与 fresh 同一规则，P0-3）之后仅以**未验证权重（20，低于删除阈值 40）**参与评分；运行时语义见证（真实条目上 helper 判定与 promoted 元数据/entryId 证据相关性，≥12 样本且 ≥1 正例一致、0 矛盾 → 验证，权重升至 45；矛盾 >1 → 禁用并从缓存移除）。验证状态不跨进程持久化 |
 
-## 二、指纹矩阵
+## 二、Resolver discovery matrix（P1-1：discovery 与 scoring 对齐）
 
-| target | strong fingerprint | weak fingerprint | runtime witness | fallback | ambiguity rule |
-|---|---|---|---|---|---|
-| urt_emit | 方法用字符串 `"Ad removal: "` **和** `" ads removed (spacing="`；参数 `(Object, kotlin.coroutines.Continuation)` 返回 Object；声明类实现 `kotlinx.coroutines.flow.h` | 任一字符串单独命中；或 @DebugMetadata 含 `DefaultURTTimelineRepository` + emit 形状；或包名 `com.x.repositories.urt` 加形状 | 首次调用 arg0∈List 且元素有 entryId（或 instanceof UrtTimelineItem）→ 晋升；3 次不符 → 自卸载 | 12.3.1 历史种子反射：`com.x.repositories.urt.j$a.emit(Object,Continuation)`（加载成功即用，仍走 witness） | 强指纹唯一命中 → 直接装 Hook（带 witness 自校验）；≥2 候选或分差 <10 → probe witness；无见证 → fail-open |
-| model.urtItemInterface | 类名 `com.x.models.timelines.items.UrtTimelineItem`（未混淆语义名）+ 是接口 + 有 `getEntryId()String/getSortIndex()J` | 仅类名 + 是接口 | 不需要 | witness 改用 entryId 形状检查（不依赖该类） | 唯一命中才持久化 |
-| model.adHelperIsAd | 静态方法参数 `UrtTimelineItem` 返回 boolean，同类存在参数相同返回 `TimelinePromotedMetadata` 的伴随方法 | 包名 `com.x.models.timelines.items`；方法名历史种子 `a`/`b` | 不需要（null 入参不抛错验证） | AdDetector 语义 getter 链（永不失效，不依赖本 target） | 形状对不唯一即放弃，仅作加分证据 |
+一个特征只有先被 discovery 找到，scoring 才有机会使用它。下表保证没有
+"只能加分但永远不会被发现"的幽灵特征（DiscoveryAlignmentTest 静态校验）。
+discovery 按选择度从上到下执行，出现"≥70 分且无歧义（分差≥10）"的领先者即
+提前停止（保证 12.17.0 strong 路径冷启动不退化）。
 
-### 评分框架（实现于 CandidateScoring）
+### urt_emit
+
+| # | discovery 入口 | 查询 | 对应 scoring 证据 |
+|---|---|---|---|
+| 1 | primary string | `usingStrings("Ad removal: ")` + CPS 形状 | strings（+45/+15） |
+| 2 | secondary string | `usingStrings(" ads removed (spacing=")` | strings（+45/+15） |
+| 3 | spacing metric | `usingStrings("minimum_spacing_ad_removal")` | strings:one（+15） |
+| 4 | spacing logic | `usingStrings("minimum_spacing")` | spacingLogic（+10） |
+| 5 | brand safety | `usingStrings("brand_safety")` | spacingLogic（+10） |
+| 6 | structural | `com.x.repositories` 包内 name=emit + `(Object,Continuation)->Object` | cpsShape/nameSeed/urtPackage/emitOverride |
+| 7 | legacy seed | 12.3.1 `com.x.repositories.urt.j$a` 反射 | nameSeed（兼容兜底） |
+
+### 评分框架（实现于 CandidateScoring，2.0.1 修订）
 
 ```
-+45 命中双高熵业务字符串（"Ad removal: " + spacing 字符串）
-+15 单高熵字符串
++45 命中双高熵业务字符串（"Ad removal: " + " ads removed (spacing="）
++15 单高熵字符串（primary / secondary / minimum_spacing_ad_removal 之一）
 +15 (Object, Continuation)->Object CPS 形状
-+10 声明类实现 FlowCollector
-+10 调用 getEntryId / 广告判定静态方法
++10 emitOverride：完整类型层级中存在同名 (Object,Continuation)->Object 接口声明
+     （TriState.YES；UNKNOWN 不得分、NO 扣分 —— P1-2，不再硬编码 kotlinx.coroutines.flow.h）
++10 spacing/brand-safety 逻辑常量（minimum_spacing / brand_safety）
 +10 包名位于 com.x.repositories.urt（仅加分）
-+5  历史类名 token 相似（j$a → h$c$a 同包 lambda 家族）
--25 形状冲突（abstract/static/bridge、参数不是 Object+Continuation）
++5  方法仍名为 emit（历史种子 token）
+-15 emitOverride = NO（层级走完仍无接口 override）
+-25 形状冲突（abstract/static、参数/返回类型不符）
 ```
 阈值：≥70 直接接受；50~69 且唯一 → 接受但 NEEDS_RUNTIME_WITNESS；
-否则进入 probe witness。
+否则进入 probe witness。Verifier 侧 `emitOverride=NO` 直接 INVALID。
 
-## 三、跨版本结论标注
+### model.urtItemInterface / model.adHelperIsAd
+
+| target | discovery | scoring | verifier | witness |
+|---|---|---|---|---|
+| model.urtItemInterface | 精确语义名 `com.x.models.timelines.items.UrtTimelineItem`（kotlinx.serialization 未混淆） | — | interface + getEntryId():String + getSortIndex() | 免（形状即语义） |
+| model.adHelperIsAd | DexKit `paramTypes=UrtTimelineItem AND returnType=boolean`，同类须有 `(UrtTimelineItem)->TimelinePromotedMetadata` 伴随 | — | static + 形状 + modelInterface 可用；**缓存与 fresh 同规**（P0-3） | **运行时语义见证**（见问题 5）；未验证权重 20 < 阈值 40，单个错误 boolean 无法独立删除 |
+
+## 三、引导状态机（2.0.1）
+
+```
+BOOTSTRAP → ATTACH_WAIT ──(Application.attach, 首次)──→ RESOLVING
+                 │                                        │
+                 │ 20s bootstrap deadline（仅覆盖 BOOTSTRAP/ATTACH_WAIT/RESOLVING，
+                 │ probe 启动即取消 —— P0-2）              ├─ 唯一且 ≥70 分（strong direct）→ 装钩
+                 │                                        │   → READY（runtimeSelfCheck=pending，
+                 ▼                                        │       首个真实样本通过后落盘 witnessed）
+            DEGRADED（fail-open，X 原样可用）              ├─ 歧义/弱 → WAITING_WITNESS（≤5 个只读探针，
+                                                          │   30s witness deadline；P0-1：会话保持活跃，
+                                                          │   完成仅由 promote/expire/cancel 事件驱动）
+                                                          │     ├─ CONFIRMED（≥2 次调用+形状占比≥0.5）→ 晋升装钩 → READY
+                                                          │     └─ 超时/全部被拒 → DEGRADED
+                                                          └─ 无安全目标 → DEGRADED
+```
+
+- 所有状态转换只在单线程 worker 上发生（P1-4）；hook/witness 回调只投递事件。
+- READY / DEGRADED 为终态冻结（P1-5）：陈旧定时器、迟到回调、旧会话事件一律忽略；
+  唯一允许的终态后迁移是 **READY → DEGRADED 安全降级**（运行时见证解除最后一个钩子时）。
+- 事件携带 sessionId；旧会话事件被丢弃。
+- READY 语义 = "钩子已安装、引导完成"；内联见证的自校验可在 READY 之后继续
+  （runtimeSelfCheck=pending → passed），README/日志与此一致（P3-2）。
+
+## 四、跨版本结论标注
 
 - 模型层未混淆（com.x.models.**）：VERIFIED_LATEST（12.17.0），且此类
   kotlinx.serialization 模型名自 12.x 重构引入后跨小版本保持（INFERRED_CROSS_VERSION）。
-- emit 方法内业务字符串：VERIFIED_LATEST；跨版本漂移风险由强/弱/回退三层 +
-  witness + 缓存失效自动重解析吸收（RUNTIME_SELF_ADAPTING）。
+- emit 方法内业务字符串：VERIFIED_LATEST；跨版本漂移风险由 7 入口 discovery 梯子
+  （5 个业务字符串 + 结构入口 + 历史种子）+ witness + 缓存失效自动重解析吸收
+  （RUNTIME_SELF_ADAPTING）。
 - 12.3.1 反射种子仅作 fallback 兼容（UNVERIFIED_HISTORICAL for future versions）。
+
+## 五、"小版本通杀"的工程定义
+
+> **普通 X 小版本升级不需要维护逐版本 Hook 表；当业务语义和调用结构仍可识别时，
+> 通过运行时 DexKit + Verifier + Witness 自动重新定位目标。遇到大版本或业务架构
+> 代际变化时，允许重新分析最新版并更新 Resolver/fingerprint。**
+
+不承诺：永久全版本兼容、未来任意版本零维护、所有历史 X 全部支持。
+versionCode 仅用于缓存失效与日志，不参与任何业务分支。

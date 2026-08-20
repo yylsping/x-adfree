@@ -38,3 +38,6 @@ x_initial.png
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local tooling and device artifacts
+.tools/

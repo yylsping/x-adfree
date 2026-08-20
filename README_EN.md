@@ -18,23 +18,25 @@ An LSPosed ad-removal module for the X Android app, built with libxposed Modern 
 
 | Component | Requirement |
 | --- | --- |
-| Target app | X 12.x series; verified on 12.3.1 and 12.17.0-release.0. Not bound to a single version — new minor versions are adapted at runtime |
+| Target app | X 12.x series; verified on 12.3.1 and 12.17.0-release.0. Not bound to a single version — ordinary minor versions are adapted at runtime |
 | Android | Android 9.0 (API 28) or later |
 | Framework | Official LSPosed with libxposed Modern API 102 support |
-| Module version | 2.0.0 (versionCode 19) |
+| Module version | 2.0.1 (versionCode 20) |
 
-The module resolves its targets through feature fingerprints, shape verification, and a runtime witness instead of hard-coded class tables. If a future X refactor invalidates the fingerprints, the module fails open — X keeps working unfiltered — until an updated module release.
+The module resolves its targets through feature fingerprints, shape verification, and a runtime witness instead of hard-coded class tables. **Engineering definition of "minor-version agnostic"**: ordinary X minor upgrades need no per-version hook table; while business semantics and call structure remain recognizable, runtime DexKit + Verifier + Witness relocate targets automatically; a generational redesign may require re-analysis and a Resolver update. Zero-maintenance compatibility with arbitrary future versions is not promised. If a future X refactor invalidates every fingerprint, the module fails open — X keeps working unfiltered — until an updated module release.
 
 X releases after 11.82.0 include `libpairipcore.so`. Before using this module, select X (`com.twitter.android`) under **LSPosed Settings → Restore inline hooks**. Without this option, X may terminate during a cold start.
 
 ## How it works (short version)
 
-1. When the X main process starts, the module records the installed target identity (package, APK and split sizes, signing certificate hash) as a stable token.
-2. On first run, DexKit resolves the URT emit hook point, the timeline model interface, and the app's ad predicate through a four-tier fingerprint ladder (strong/weak/name/fallback); candidates are scored on orthogonal features, and ambiguous ones are promoted only after read-only probes observe real traffic.
-3. Results are cached per identity (atomic writes, at most 5 targets, LRU eviction); on every later launch each cached target is re-verified as loadable and correctly shaped before reuse.
-4. After installation the hook is validated by the runtime witness against the first real payload; ad detection (promoted metadata / entryId prefix / app predicate) votes with a tri-state verdict and only confirmed ads are removed.
+1. When the X main process starts, the module records the installed target identity (package, APK and split sizes, signing certificate hash, versionCode) as a stable token; versionCode is a cache-invalidation factor only, never a behavior branch.
+2. On first run, DexKit discovers emit candidates through seven entries (five high-entropy business strings, a structural entry, and a historical seed) and scores them on orthogonal features; ambiguous or weak tops receive up to five read-only probes and are promoted only after at least two real invocations with a healthy shaped-element ratio. The timeline model interface and the app's own ad predicate are resolved alongside.
+3. The app's own boolean ad predicate only contributes a weight below the removal threshold until a runtime semantic witness correlates it with independent evidence on real items — a single mis-resolved helper can never delete normal content, and a contradicting helper is disabled outright.
+4. Results are cached per identity (atomic replace, at most 5 identities, LRU eviction); on every later launch each cached target is re-verified with the exact same rules as a fresh resolution before reuse.
+5. After installation the hook is validated by the runtime witness against the first real payload; mismatches truly unhook the interceptor and invalidate that cache entry. Ad detection votes with a tri-state verdict and only confirmed ads are removed. Filtering replaces ArrayList outputs only; unknown List implementations pass through unfiltered (fail-open).
+6. The bootstrap state machine is serialized on one worker thread; READY/DEGRADED are frozen terminal states. The 20s bootstrap watchdog covers the resolve phase only, and the probe window has its own independent 30s deadline.
 
-See [docs/analysis-12.17.0.md](docs/analysis-12.17.0.md) for the full analysis.
+See [docs/analysis-12.17.0.md](docs/analysis-12.17.0.md) for the full analysis (fingerprint matrix, state machine, discovery matrix).
 
 ## Installation
 

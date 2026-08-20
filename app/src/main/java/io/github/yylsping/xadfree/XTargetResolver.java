@@ -14,6 +14,7 @@ final class XTargetResolver {
     static final String TIER_STRONG = "fingerprint_strong";
     static final String TIER_WEAK = "fingerprint_weak";
     static final String TIER_SEMANTIC_NAME = "semantic_name";
+    static final String TIER_RUNTIME_WITNESS = "runtime_witness";
     static final String TIER_FALLBACK = "fallback_compat";
 
     private XTargetResolver() {

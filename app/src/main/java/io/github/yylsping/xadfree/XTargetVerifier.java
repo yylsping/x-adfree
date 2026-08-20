@@ -2,15 +2,22 @@ package io.github.yylsping.xadfree;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.IdentityHashMap;
 
 /**
  * Reflection re-verification of cached or DexKit candidates before any hook
  * is installed. Structural checks only — business semantics are proven by the
  * runtime witness.
+ *
+ * <p>Every structural check that can be unavailable is tri-state (P1-2):
+ * YES adds evidence, NO rejects or penalizes, UNKNOWN neither credits nor
+ * validates. An unverifiable check must never be treated as passed.
  */
 final class XTargetVerifier {
     static final String CONTINUATION_CLASS = "kotlin.coroutines.Continuation";
-    static final String FLOW_COLLECTOR_CLASS = "kotlinx.coroutines.flow.h";
+
+    /** Tri-state result of a structural check that may be unavailable. */
+    enum TriState { YES, NO, UNKNOWN }
 
     enum Verdict {
         VALIDATED_STATIC,
@@ -34,8 +41,8 @@ final class XTargetVerifier {
     /**
      * Verifies one urt_emit target: class loadable, method loadable, exact
      * (Object, Continuation) -> Object CPS shape, non-abstract instance
-     * method, declaring class implements FlowCollector, and still owned by
-     * the target app ClassLoader.
+     * method that overrides a matching interface declaration somewhere in its
+     * hierarchy, and still owned by the target app ClassLoader.
      */
     static Verification verifyUrtEmit(ResolvedTarget target, ClassLoader loader,
                                       Class<?> objectType, Class<?> continuationType) {
@@ -80,8 +87,9 @@ final class XTargetVerifier {
             if (method.getReturnType() != objectType) {
                 return "return type mismatch";
             }
-            if (!declaresFlowCollector(type, loader)) {
-                return "declaring class does not implement FlowCollector";
+            TriState override = interfaceOverrideShape(method);
+            if (override == TriState.NO) {
+                return "no interface override of emit shape";
             }
             if (!isOwnedByLoader(type, loader)) {
                 return "class not owned by target loader";
@@ -90,6 +98,78 @@ final class XTargetVerifier {
         } catch (Throwable throwable) {
             return String.valueOf(throwable);
         }
+    }
+
+    /**
+     * Whether {@code method} overrides a same-name (Object, Continuation) ->
+     * Object declaration on some interface of its hierarchy. This is the
+     * FlowCollector structural footprint without hard-coding any R8-renamed
+     * class (P1-2). YES: proven override; NO: the full hierarchy walked to
+     * {@code java.lang.Object} without one; UNKNOWN: hierarchy reflection
+     * failed — no credit, no rejection.
+     */
+    static TriState interfaceOverrideShape(Method method) {
+        if (method == null) {
+            return TriState.UNKNOWN;
+        }
+        try {
+            Class<?> objectType = Object.class;
+            IdentityHashMap<Class<?>, Boolean> seenInterfaces = new IdentityHashMap<>();
+            for (Class<?> cursor = method.getDeclaringClass(); cursor != null;
+                 cursor = cursor.getSuperclass()) {
+                for (Class<?> iface : collectInterfaces(cursor, seenInterfaces)) {
+                    for (Method declared : iface.getDeclaredMethods()) {
+                        if (Modifier.isStatic(declared.getModifiers())) {
+                            continue;
+                        }
+                        if (!declared.getName().equals(method.getName())) {
+                            continue;
+                        }
+                        Class<?>[] params = declared.getParameterTypes();
+                        if (params.length == 2
+                                && params[0] == objectType
+                                && declared.getReturnType() == objectType
+                                && isContinuationParam(params[1])) {
+                            return TriState.YES;
+                        }
+                    }
+                }
+            }
+            return TriState.NO;
+        } catch (Throwable throwable) {
+            return TriState.UNKNOWN;
+        }
+    }
+
+    private static boolean isContinuationParam(Class<?> param) {
+        // Structural Continuation footprint: any interface declaring
+        // getContext()Lkotlin/coroutines/CoroutineContext; — avoids importing
+        // the Kotlin runtime on the verifier classpath.
+        try {
+            return param.isInterface() && param.getMethod("getContext") != null;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static java.util.List<Class<?>> collectInterfaces(
+            Class<?> type, IdentityHashMap<Class<?>, Boolean> seen) {
+        java.util.ArrayList<Class<?>> found = new java.util.ArrayList<>();
+        java.util.ArrayDeque<Class<?>> queue = new java.util.ArrayDeque<>();
+        for (Class<?> direct : type.getInterfaces()) {
+            queue.add(direct);
+        }
+        while (!queue.isEmpty()) {
+            Class<?> iface = queue.poll();
+            if (iface == null || seen.put(iface, Boolean.TRUE) != null) {
+                continue;
+            }
+            found.add(iface);
+            for (Class<?> parent : iface.getInterfaces()) {
+                queue.add(parent);
+            }
+        }
+        return found;
     }
 
     /** Verifies the optional model interface target. */
@@ -131,6 +211,9 @@ final class XTargetVerifier {
         if (target == null) {
             return "null target";
         }
+        if (modelInterface == null) {
+            return "model interface unavailable";
+        }
         try {
             Method method = DescriptorUtils.methodForDescriptor(target.methodDescriptor, loader);
             if (method == null) {
@@ -149,17 +232,6 @@ final class XTargetVerifier {
             return null;
         } catch (Throwable throwable) {
             return String.valueOf(throwable);
-        }
-    }
-
-    static boolean declaresFlowCollector(Class<?> type, ClassLoader loader) {
-        try {
-            Class<?> collector = Class.forName(FLOW_COLLECTOR_CLASS, false, loader);
-            return collector.isAssignableFrom(type);
-        } catch (Throwable ignored) {
-            // FlowCollector not loadable (kotlinx missing): treat the check as
-            // unavailable rather than rejecting every candidate.
-            return true;
         }
     }
 

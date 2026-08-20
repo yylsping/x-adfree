@@ -33,11 +33,11 @@ final class XResolutionCache {
     private final Object lock = new Object();
 
     XResolutionCache(Context appContext) {
-        this(appContext.getFilesDir(), CacheAtomicWriter.RENAME_REPLACE);
+        this(appContext.getFilesDir(), CacheAtomicWriter.NIO_MOVE_REPLACE);
     }
 
     XResolutionCache(File filesDir) {
-        this(filesDir, CacheAtomicWriter.RENAME_REPLACE);
+        this(filesDir, CacheAtomicWriter.NIO_MOVE_REPLACE);
     }
 
     XResolutionCache(File filesDir, CacheAtomicWriter.ReplaceOperation replaceOperation) {
@@ -98,6 +98,35 @@ final class XResolutionCache {
             } catch (Throwable ignored) {
             }
         }
+    }
+
+    /**
+     * Merges a single target into the identity's stored set (P1-7): existing
+     * targets of the same identity — e.g. an already resolved adHelper — are
+     * preserved, never overwritten by a partial promotion write. Keys follow
+     * {@link XTargetResolver#mergeTargets} descriptor-stable rules.
+     */
+    void updateTarget(XTargetIdentity identity, ResolvedTarget target) {
+        if (target == null) {
+            return;
+        }
+        synchronized (lock) {
+            try {
+                Map<String, ResolvedTarget> current = loadTargetsLocked(identity);
+                XTargetResolver.mergeTargets(current,
+                        java.util.Collections.singletonMap(target.key, target));
+                saveTargets(identity, current);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private Map<String, ResolvedTarget> loadTargetsLocked(XTargetIdentity identity) {
+        JSONObject entry = findEntry(identity);
+        if (entry == null) {
+            return new LinkedHashMap<>();
+        }
+        return decodeTargets(entry);
     }
 
     /** Removes a single target key of the current identity; the rest stay untouched. */
