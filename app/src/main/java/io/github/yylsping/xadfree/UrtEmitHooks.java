@@ -80,17 +80,27 @@ final class UrtEmitHooks {
         }
     }
 
-    /** True unhook of one installed filter hook (coordinator worker thread). */
+    /**
+     * True unhook of one installed filter hook (coordinator worker thread).
+     * The log states the real outcome: if the framework handle itself throws,
+     * the interceptor is already inert (witness dead, registry entry removed),
+     * and the log says so instead of claiming success.
+     */
     boolean unhook(String descriptor) {
         InstalledHook hook = installed.remove(descriptor);
         if (hook == null) {
             return false;
         }
+        boolean handleUnhooked = false;
         try {
             hook.handle.unhook();
+            handleUnhooked = true;
         } catch (Throwable ignored) {
         }
-        log.info("hook target=urt_emit unhooked=true descriptor=" + descriptor);
+        log.info("hook target=urt_emit unhooked=" + handleUnhooked
+                + " registryRemoved=true"
+                + (handleUnhooked ? "" : " reason=handleThrew interceptorInert=true")
+                + " descriptor=" + descriptor);
         return true;
     }
 
@@ -253,7 +263,7 @@ final class UrtEmitHooks {
             }
             if (failReason != null) {
                 log.info("witness target=urt_emit state=failed descriptor=" + descriptor
-                        + " reason=" + failReason + " unhooked=true");
+                        + " reason=" + failReason + " action=unhook");
                 unhookByWitness(descriptor, failReason);
             }
             return allowFiltering;
@@ -274,7 +284,7 @@ final class UrtEmitHooks {
             }
             if (failNow) {
                 log.info("witness target=urt_emit state=failed descriptor=" + descriptor
-                        + " reason=" + reason + " unhooked=true");
+                        + " reason=" + reason + " action=unhook");
                 unhookByWitness(descriptor, reason);
             }
         }

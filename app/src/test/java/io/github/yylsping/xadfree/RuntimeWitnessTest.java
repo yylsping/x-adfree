@@ -58,7 +58,7 @@ public final class RuntimeWitnessTest {
     }
 
     private RuntimeWitness installTwoProbes() throws Exception {
-        RuntimeWitness witness = new RuntimeWitness(framework, new ModuleLog(null, false), detector, listener, scheduler);
+        RuntimeWitness witness = new RuntimeWitness(framework, ModuleLog.silent(), detector, listener, scheduler);
         Method good = WitnessFixtures.GoodEmit.class.getDeclaredMethod("emit",
                 Object.class, WitnessFixtures.FakeContinuation.class);
         Method rival = WitnessFixtures.RivalEmit.class.getDeclaredMethod("emit",
@@ -212,7 +212,7 @@ public final class RuntimeWitnessTest {
 
     @Test
     public void emptyInstallListIsRejected() {
-        RuntimeWitness witness = new RuntimeWitness(framework, new ModuleLog(null, false), detector, listener, scheduler);
+        RuntimeWitness witness = new RuntimeWitness(framework, ModuleLog.silent(), detector, listener, scheduler);
 
         assertFalse(witness.installProbes(Collections.emptyList()));
         assertTrue(events.isEmpty());

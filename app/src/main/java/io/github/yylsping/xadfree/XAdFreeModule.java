@@ -34,7 +34,7 @@ public final class XAdFreeModule extends XposedModule {
             started = true;
         }
 
-        ModuleLog log = new ModuleLog(this, false);
+        ModuleLog log = ModuleLog.forModule(this, false);
         log.info("bootstrap moduleLoaded target=" + TARGET_PACKAGE
                 + " mode=dexkit-dynamic-resolution");
         try {

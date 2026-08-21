@@ -52,7 +52,7 @@ public final class HookCoordinatorTest {
         identity = new XTargetIdentity("com.twitter.android", "/p", 100L, "cert",
                 XTargetIdentity.stableToken("com.twitter.android", 100L, null, "cert", 12L),
                 12L, "12.17.0-test");
-        log = new ModuleLog(null, false);
+        log = ModuleLog.silent();
     }
 
     /** Builds a coordinator with fixture components; resolver is overridable. */

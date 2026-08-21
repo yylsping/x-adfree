@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /** In-memory HookFramework for JVM tests. */
-public final class FakeHookFramework implements HookFramework {
+public class FakeHookFramework implements HookFramework {
     /** Result marker returned by proceed() with original arguments. */
     public static final Object ORIGINAL = new Object() {
         @Override

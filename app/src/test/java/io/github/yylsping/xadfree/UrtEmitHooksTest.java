@@ -43,7 +43,7 @@ public final class UrtEmitHooksTest {
                 events.add("failed:" + methodDescriptor + ":" + reason);
             }
         };
-        hooks = new UrtEmitHooks(framework, new ModuleLog(null, false),
+        hooks = new UrtEmitHooks(framework, ModuleLog.silent(),
                 detector, filter, listener);
     }
 
@@ -236,6 +236,67 @@ public final class UrtEmitHooksTest {
         assertTrue(hooks.unhook(descriptor));
         assertFalse(hooks.unhook(descriptor)); // Idempotent second call.
         assertFalse(hooks.hasInstalled());
+    }
+
+    // ------------------------------------------------------------------
+    // Log accuracy (2.0.2 final polish): the unhook log states the real
+    // outcome even when the framework handle itself throws.
+    // ------------------------------------------------------------------
+
+    private static ModuleLog capturingLog(final List<String> lines) {
+        return new ModuleLog((priority, tag, message, throwable) -> lines.add(message), false);
+    }
+
+    private static String lastLineContaining(List<String> lines, String needle) {
+        String found = "";
+        for (String line : lines) {
+            if (line.contains(needle)) {
+                found = line;
+            }
+        }
+        return found;
+    }
+
+    @Test
+    public void unhookLogStatesRealOutcomeWhenHandleThrows() throws Exception {
+        final List<String> lines = Collections.synchronizedList(new ArrayList<>());
+        HookFramework throwingFramework = new FakeHookFramework() {
+            @Override
+            public HookHandle hook(Method method, String id, HookCallback callback) {
+                super.hook(method, id, callback); // Keep the install recordable.
+                return () -> {
+                    throw new IllegalStateException("framework refused");
+                };
+            }
+        };
+        UrtEmitHooks hooksWithBadFramework = new UrtEmitHooks(
+                throwingFramework, capturingLog(lines), detector, filter, listener);
+        Method method = emitMethod();
+        assertTrue(hooksWithBadFramework.install(method));
+
+        assertTrue("registry removal still succeeds", hooksWithBadFramework.unhook(descriptorOf(method)));
+        assertFalse(hooksWithBadFramework.hasInstalled());
+
+        String line = lastLineContaining(lines, "unhooked=");
+        assertTrue("log must exist: " + lines, !line.isEmpty());
+        assertTrue("must report failure honestly: " + line, line.contains("unhooked=false"));
+        assertTrue("registry removal is still real: " + line, line.contains("registryRemoved=true"));
+        assertTrue("must explain inertness: " + line, line.contains("interceptorInert=true"));
+    }
+
+    @Test
+    public void unhookLogStatesSuccessOnHealthyHandle() throws Exception {
+        final List<String> lines = Collections.synchronizedList(new ArrayList<>());
+        UrtEmitHooks healthyHooks = new UrtEmitHooks(
+                framework, capturingLog(lines), detector, filter, listener);
+        Method method = emitMethod();
+        healthyHooks.install(method);
+
+        healthyHooks.unhook(descriptorOf(method));
+
+        String line = lastLineContaining(lines, "unhooked=");
+        assertTrue("must report success: " + line, line.contains("unhooked=true"));
+        assertFalse("no failure marker on success: " + line, line.contains("interceptorInert"));
     }
 
     // ------------------------------------------------------------------

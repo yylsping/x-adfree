@@ -49,3 +49,10 @@ hs_err_pid*
 
 # Android Studio device captures
 captures/
+
+# 用户本地定义/提示词文件，永不入库
+/AGENTS.md
+/x-adfree-*.md
+
+# 用户本地归档快照（工作区 zip），永不入库
+/*.zip

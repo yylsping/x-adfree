@@ -8,7 +8,7 @@ An LSPosed ad-removal module for the X Android app, built with libxposed Modern 
 
 - Removes ads from the Home timeline (For You / Following).
 - Removes ads from post detail pages and replies.
-- Identifies ads through the target app's data models (URT promoted metadata, entryId prefixes, and the app's own ad predicate) with tri-state verdicts; anything uncertain is passed through, so normal posts are never dropped.
+- Identifies ads through the target app's data models (URT promoted metadata, entryId prefixes, and the app's own ad predicate) with tri-state verdicts; anything uncertain is passed through, minimizing the chance of normal posts being dropped (not an absolute guarantee).
 - Filters at a single convergence point in the URT data layer, which benefits every timeline-consuming surface at once, independent of UI layout.
 - Locates target methods at runtime with DexKit using multi-feature fingerprints (string usage, method signature, type shape) and caches results per installed target identity; subsequent launches hit the cache without re-resolving.
 - Built-in runtime witness: the first real invocation after hook installation must match the URT data shape, otherwise the hook unhooks itself and invalidates its cache entry, so a mis-fingerprinted candidate can never disturb unrelated flows.
@@ -18,7 +18,7 @@ An LSPosed ad-removal module for the X Android app, built with libxposed Modern 
 
 | Component | Requirement |
 | --- | --- |
-| Target app | X 12.x series; verified on 12.3.1 and 12.17.0-release.0. Not bound to a single version — ordinary minor versions are adapted at runtime |
+| Target app | Dynamically adapted to X 12.x minor versions; currently verified on 12.17.0-release.0 (12.3.1 is retained only as a historical compatibility seed, not re-tested on the 2.0.x architecture) |
 | Android | Android 9.0 (API 28) or later |
 | Framework | Official LSPosed with libxposed Modern API 102 support |
 | Module version | 2.0.2 (versionCode 21) |
