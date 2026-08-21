@@ -164,52 +164,76 @@ final class XTargetIdentity {
     }
 
     /**
-     * Deterministic digest over all signers (order-independent) so a rotated
-     * signing history does not flap the cache token between launches.
+     * Deterministic digest over the selected signer set (P2-1/P2-2):
+     * <ul>
+     *   <li>{@code signingInfo == null} → explicit {@code unavailable} marker
+     *       (never a disguised empty-input digest);</li>
+     *   <li>multiple signers → current APK contents signers;</li>
+     *   <li>single signer → signing-certificate rotation history first
+     *       (covers past rotations of the same lineage), falling back to the
+     *       current contents signer;</li>
+     *   <li>pre-P API → the legacy {@code signatures} array.</li>
+     * </ul>
+     * Multiple certificates are sorted (unsigned byte order) and
+     * concatenated before hashing, so the digest is independent of the
+     * system's return order and stable across launches.
      */
     static byte[] signingCertificateBytes(PackageInfo packageInfo) {
         if (packageInfo == null) {
-            return UNAVAILABLE_SIGNER.getBytes(StandardCharsets.UTF_8);
+            return unavailableSignerBytes();
         }
         try {
-            List<byte[]> certificates = new ArrayList<>();
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 SigningInfo signingInfo = packageInfo.signingInfo;
                 if (signingInfo != null) {
-                    appendCertificates(certificates, signingInfo.getApkContentsSigners());
-                    if (signingInfo.hasMultipleSigners()) {
-                        appendCertificates(certificates, signingInfo.getSigningCertificateHistory());
+                    byte[][] selected = selectSigners(
+                            signingInfo.hasMultipleSigners(),
+                            toByteArrays(signingInfo.getSigningCertificateHistory()),
+                            toByteArrays(signingInfo.getApkContentsSigners()));
+                    if (hasCertificates(selected)) {
+                        return combineCertificates(selected);
                     }
                 }
             }
-            if (certificates.isEmpty()) {
-                appendCertificates(certificates, packageInfo.signatures);
+            byte[][] legacy = toByteArrays(packageInfo.signatures);
+            if (hasCertificates(legacy)) {
+                return combineCertificates(legacy);
             }
-            if (certificates.isEmpty()) {
-                return UNAVAILABLE_SIGNER.getBytes(StandardCharsets.UTF_8);
-            }
-            List<byte[]> ordered = new ArrayList<>(certificates);
-            ordered.sort(XTargetIdentity::compareBytes);
-            int total = 0;
-            for (byte[] certificate : ordered) {
-                total += certificate.length;
-            }
-            byte[] all = new byte[total];
-            int offset = 0;
-            for (byte[] certificate : ordered) {
-                System.arraycopy(certificate, 0, all, offset, certificate.length);
-                offset += certificate.length;
-            }
-            return all;
+            return unavailableSignerBytes();
         } catch (Throwable ignored) {
-            return UNAVAILABLE_SIGNER.getBytes(StandardCharsets.UTF_8);
+            return unavailableSignerBytes();
         }
     }
 
-    private static void appendCertificates(List<byte[]> out, Signature[] signatures) {
-        if (signatures == null) {
-            return;
+    /**
+     * Signer-set selection per Android semantics (P2-1): parallel signers
+     * describe the current APK; a single signer may carry a rotation
+     * history, which is the stable lineage identity.
+     */
+    static byte[][] selectSigners(boolean hasMultipleSigners,
+                                  byte[][] history, byte[][] contents) {
+        if (hasMultipleSigners) {
+            return contents;
         }
+        if (history != null && history.length > 0) {
+            return history;
+        }
+        return contents;
+    }
+
+    private static boolean hasCertificates(byte[][] certificates) {
+        return certificates != null && certificates.length > 0;
+    }
+
+    private static byte[] unavailableSignerBytes() {
+        return UNAVAILABLE_SIGNER.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static byte[][] toByteArrays(Signature[] signatures) {
+        if (signatures == null) {
+            return null;
+        }
+        java.util.ArrayList<byte[]> out = new java.util.ArrayList<>(signatures.length);
         for (Signature signature : signatures) {
             if (signature != null) {
                 byte[] bytes = signature.toByteArray();
@@ -218,6 +242,35 @@ final class XTargetIdentity {
                 }
             }
         }
+        return out.isEmpty() ? null : out.toArray(new byte[0][]);
+    }
+
+    /** Order-independent concatenation of the signer DER bytes. */
+    static byte[] combineCertificates(byte[][] certificates) {
+        if (certificates == null || certificates.length == 0) {
+            return unavailableSignerBytes();
+        }
+        List<byte[]> ordered = new ArrayList<>(certificates.length);
+        for (byte[] certificate : certificates) {
+            if (certificate != null && certificate.length > 0) {
+                ordered.add(certificate);
+            }
+        }
+        if (ordered.isEmpty()) {
+            return unavailableSignerBytes();
+        }
+        ordered.sort(XTargetIdentity::compareBytes);
+        int total = 0;
+        for (byte[] certificate : ordered) {
+            total += certificate.length;
+        }
+        byte[] all = new byte[total];
+        int offset = 0;
+        for (byte[] certificate : ordered) {
+            System.arraycopy(certificate, 0, all, offset, certificate.length);
+            offset += certificate.length;
+        }
+        return all;
     }
 
     /** Unsigned lexicographic byte[] order (Arrays.compare is API 33+). */

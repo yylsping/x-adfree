@@ -41,3 +41,11 @@ Thumbs.db
 
 # Local tooling and device artifacts
 .tools/
+
+# Kotlin/JVM local runtime artifacts
+.kotlin/
+*.hprof
+hs_err_pid*
+
+# Android Studio device captures
+captures/

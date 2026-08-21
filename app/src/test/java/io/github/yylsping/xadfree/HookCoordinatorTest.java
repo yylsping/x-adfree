@@ -8,7 +8,9 @@ import static org.junit.Assert.assertTrue;
 
 import java.io.File;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -61,6 +63,8 @@ public final class HookCoordinatorTest {
     final class CoordinatorBuilder {
         ResolverOverride override;
         XResolutionCache cache;
+        final List<XDexKitSession> dexKitSessions =
+                Collections.synchronizedList(new ArrayList<>());
 
         CoordinatorBuilder withResolver(ResolverOverride override) {
             this.override = override;
@@ -76,6 +80,7 @@ public final class HookCoordinatorTest {
             final XResolutionCache effectiveCache =
                     cache != null ? cache : new XResolutionCache(cacheDir);
             final ResolverOverride effectiveOverride = override;
+            final List<XDexKitSession> sessions = dexKitSessions;
             return new HookCoordinator(log, "com.twitter.android",
                     HookCoordinatorTest.class.getClassLoader(),
                     framework, scheduler, clock::get, null,
@@ -92,10 +97,26 @@ public final class HookCoordinatorTest {
 
                         @Override
                         public XDexKitSession createDexKitSession(Object appContext) {
-                            return new XDexKitSession(log, null,
+                            XDexKitSession session = new XDexKitSession(log, null,
                                     HookCoordinatorTest.class.getClassLoader(), null);
+                            sessions.add(session);
+                            return session;
                         }
                     }) {
+                @Override
+                java.util.concurrent.ExecutorService createWorker() {
+                    // Short keepAlive so idle exit is observable in tests.
+                    return new java.util.concurrent.ThreadPoolExecutor(
+                            0, 1, 200L, java.util.concurrent.TimeUnit.MILLISECONDS,
+                            new java.util.concurrent.LinkedBlockingQueue<>(),
+                            runnable -> {
+                                Thread thread = new Thread(runnable,
+                                        "xadfree-resolver-worker-test");
+                                thread.setDaemon(true);
+                                return thread;
+                            });
+                }
+
                 @Override
                 HookCoordinator.ResolveOutcome resolveWithDexKit(
                         Class<?> objectType, Class<?> continuationType) {
@@ -525,5 +546,113 @@ public final class HookCoordinatorTest {
         assertEquals(HookCoordinator.State.READY, coordinator.stateForTests());
     }
 
+    // ------------------------------------------------------------------
+    // 2.0.2 lifecycle: idle worker exit, timers, bridge release
+    // ------------------------------------------------------------------
+
+    @Test
+    public void readyCancelsBootstrapTimer() throws Exception {
+        XResolutionCache cache = new XResolutionCache(cacheDir);
+        Map<String, ResolvedTarget> targets = new LinkedHashMap<>();
+        targets.put(XTargetResolver.KEY_URT_EMIT,
+                emitTarget(emitOf(WitnessFixtures.GoodEmit.class), true));
+        cache.saveTargets(identity, targets);
+        HookCoordinator coordinator = builder().withCache(cache).build();
+
+        coordinator.install();
+        assertTrue(scheduler.isScheduled("bootstrap-deadline"));
+        fireAttach(new Object());
+        coordinator.awaitWorkerIdleForTests();
+
+        assertEquals(HookCoordinator.State.READY, coordinator.stateForTests());
+        assertFalse("one-shot bootstrap timer must not survive READY",
+                scheduler.isScheduled("bootstrap-deadline"));
+    }
+
+    @Test
+    public void workerThreadExitsAfterIdleAndRestartsForLaterEvents() throws Exception {
+        XResolutionCache cache = new XResolutionCache(cacheDir);
+        Map<String, ResolvedTarget> targets = new LinkedHashMap<>();
+        targets.put(XTargetResolver.KEY_URT_EMIT,
+                emitTarget(emitOf(WitnessFixtures.GoodEmit.class), false));
+        cache.saveTargets(identity, targets);
+        HookCoordinator coordinator = builder().withCache(cache).build();
+
+        coordinator.install();
+        fireAttach(new Object());
+        coordinator.awaitWorkerIdleForTests();
+        assertEquals(HookCoordinator.State.READY, coordinator.stateForTests());
+
+        // Run the inline runtime self-check so no further events are pending,
+        // then let the short keepAlive expire.
+        FakeHookFramework.Install hook = framework.findById("xadfree-urt-emit-filter");
+        assertNotNull(hook);
+        hook.fire(WitnessFixtures.timeline(new WitnessFixtures.EntryWithId("tweet-1")),
+                new Object());
+        coordinator.awaitWorkerIdleForTests();
+        waitUntilWorkerPoolSize(coordinator, 0);
+
+        // Filtering continues synchronously — the hook does not need the worker.
+        FakeHookFramework.Chain chain = hook.fire(
+                WitnessFixtures.timeline(new WitnessFixtures.PromotedEntry()), new Object());
+        assertEquals(1, chain.replacements.size());
+        assertEquals(HookCoordinator.State.READY, coordinator.stateForTests());
+
+        // A later legal control event transparently recreates the serial worker.
+        coordinator.fireBootstrapDeadlineForTests();
+        coordinator.awaitWorkerIdleForTests();
+        assertEquals(HookCoordinator.State.READY, coordinator.stateForTests());
+        waitUntilWorkerPoolSize(coordinator, 0);
+    }
+
+    @Test
+    public void dexKitBridgeIsReleasedAfterFailedResolve() throws Exception {
+        XResolutionCache cache = new XResolutionCache(cacheDir);
+        Map<String, ResolvedTarget> targets = new LinkedHashMap<>();
+        targets.put(XTargetResolver.KEY_URT_EMIT,
+                emitTarget(emitOf(WitnessFixtures.NoOverrideEmit.class), false));
+        cache.saveTargets(identity, targets);
+        CoordinatorBuilder localBuilder = builder().withCache(cache);
+
+        HookCoordinator coordinator = localBuilder.build();
+        coordinator.install();
+        fireAttach(new Object());
+        coordinator.awaitWorkerIdleForTests();
+
+        assertEquals(HookCoordinator.State.DEGRADED, coordinator.stateForTests());
+        assertEquals("cache miss must still create and release the bridge session",
+                1, localBuilder.dexKitSessions.size());
+        assertTrue("bridge must be closed after the resolve attempt",
+                localBuilder.dexKitSessions.get(0).isBridgeClosedForTests());
+    }
+
+    @Test
+    public void warmCacheHitNeverCreatesADexKitSession() throws Exception {
+        XResolutionCache cache = new XResolutionCache(cacheDir);
+        Map<String, ResolvedTarget> targets = new LinkedHashMap<>();
+        targets.put(XTargetResolver.KEY_URT_EMIT,
+                emitTarget(emitOf(WitnessFixtures.GoodEmit.class), true));
+        cache.saveTargets(identity, targets);
+        CoordinatorBuilder localBuilder = builder().withCache(cache);
+
+        HookCoordinator coordinator = localBuilder.build();
+        coordinator.install();
+        fireAttach(new Object());
+        coordinator.awaitWorkerIdleForTests();
+
+        assertEquals(HookCoordinator.State.READY, coordinator.stateForTests());
+        assertTrue("cache hit must not create a DexKit session",
+                localBuilder.dexKitSessions.isEmpty());
+    }
+
+    private static void waitUntilWorkerPoolSize(HookCoordinator coordinator, int expected)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 5_000L;
+        while (coordinator.workerPoolSizeForTests() != expected
+                && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+        assertEquals("worker pool size", expected, coordinator.workerPoolSizeForTests());
+    }
 }
 

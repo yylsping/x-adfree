@@ -18,9 +18,10 @@ import java.util.Map;
  * Multi-identity resolver cache.
  *
  * <p>Stores at most {@link #MAX_ENTRIES} identities; every write is atomic and
- * LRU-ordered by lastUsedAt. versionCode/versionName never participate in
- * cache identity or validity. One invalid target removes only that target of
- * the current identity — never the whole store.
+ * LRU-ordered by lastUsedAt. versionCode may participate in the identity
+ * token purely as a cache-invalidation factor — it never selects
+ * version-specific hook logic. One invalid target removes only that target
+ * of the current identity — never the whole store.
  */
 final class XResolutionCache {
     static final int SCHEMA_VERSION = 1;

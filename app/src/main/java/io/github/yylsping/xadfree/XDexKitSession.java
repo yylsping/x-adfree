@@ -23,6 +23,7 @@ final class XDexKitSession {
     private final Object lock = new Object();
 
     private DexKitBridge bridge;
+    private volatile boolean bridgeClosed;
     private int rebuildCount;
     private long loaderIdentity = -1L;
     private long createdElapsedMs = -1L;
@@ -47,6 +48,7 @@ final class XDexKitSession {
             if (bridge != null && bridge.isValid() && loaderIdentity == loaderId) {
                 return bridge;
             }
+            bridgeClosed = false;
             if (rebuildCount >= MAX_REBUILDS) {
                 log.info("resolver dexkit rebuild refused rebuildCount=" + rebuildCount
                         + " trigger=" + trigger);
@@ -87,6 +89,14 @@ final class XDexKitSession {
                         + (bridge.isValid() ? bridge.getDexNum() : -1));
             }
             closeBridge();
+            bridgeClosed = true;
+        }
+    }
+
+    /** Lifecycle tests: whether the native bridge is released. */
+    boolean isBridgeClosedForTests() {
+        synchronized (lock) {
+            return bridgeClosed;
         }
     }
 

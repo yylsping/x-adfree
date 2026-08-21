@@ -9,7 +9,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
@@ -26,8 +25,13 @@ import java.util.function.LongSupplier;
  *                 └─deadline (20s, resolve phase only)
  * </pre>
  *
- * <p>All state is owned by one single-threaded worker (P1-4): hook callbacks
- * and witness callbacks only post events; timers post events. READY and
+ * <p>All state is owned by one serial worker lane (P1-4): hook callbacks
+ * and witness callbacks only post events; timers post events. The lane is a
+ * {@code ThreadPoolExecutor(0, 1, keepAlive)} whose idle worker thread exits
+ * on its own (2.0.2) — no private thread lingers after READY once events
+ * settle, and any future legal event (late self-check, helper witness,
+ * hook failure) transparently restarts exactly one serial worker. The
+ * executor itself is never shut down. READY and
  * DEGRADED are frozen (P1-5) — the only permitted post-terminal transition is
  * the safety demotion READY → DEGRADED when a runtime witness disarms the
  * last installed hook. Every event carries the session id that produced it;
@@ -45,6 +49,8 @@ import java.util.function.LongSupplier;
 class HookCoordinator implements UrtEmitHooks.Listener, RuntimeWitness.Listener,
         AdDetector.AdHelperWitnessListener {
     static final long BOOTSTRAP_DEADLINE_MILLIS = 20_000L;
+    /** Idle seconds before the serial worker thread exits (2.0.2). */
+    static final long WORKER_KEEPALIVE_SECONDS = 10L;
     private static final String TOKEN_BOOTSTRAP_DEADLINE = "bootstrap-deadline";
 
     enum State { BOOTSTRAP, ATTACH_WAIT, RESOLVING, WAITING_WITNESS, READY, DEGRADED }
@@ -95,11 +101,12 @@ class HookCoordinator implements UrtEmitHooks.Listener, RuntimeWitness.Listener,
     private final AdDetector detector = new AdDetector(this::reportInspectionErrorOnce, this);
     private final UrtListFilter filter = new UrtListFilter(detector);
     private final UrtEmitHooks emitHooks;
-    private final ExecutorService worker = Executors.newSingleThreadExecutor(runnable -> {
-        Thread thread = new Thread(runnable, "xadfree-resolver-worker");
-        thread.setDaemon(true);
-        return thread;
-    });
+    /**
+     * Serial event lane. corePoolSize 0 + maximumPoolSize 1 keeps every
+     * coordinator event strictly serial while letting the worker thread die
+     * after {@link #WORKER_KEEPALIVE_SECONDS} idle seconds (P1-1, 2.0.2).
+     */
+    private final ExecutorService worker;
 
     private final Object stateLock = new Object();
     private final AtomicBoolean sessionScheduled = new AtomicBoolean();
@@ -135,6 +142,22 @@ class HookCoordinator implements UrtEmitHooks.Listener, RuntimeWitness.Listener,
         this.moduleInfoSupplier = moduleInfoSupplier;
         this.components = components;
         this.emitHooks = new UrtEmitHooks(framework, log, detector, filter, this);
+        this.worker = createWorker();
+    }
+
+    /**
+     * The serial event lane. Overridable so JVM tests can inject a short
+     * keepAlive; production uses an idle-exiting 0/1 pool.
+     */
+    ExecutorService createWorker() {
+        return new java.util.concurrent.ThreadPoolExecutor(
+                0, 1, WORKER_KEEPALIVE_SECONDS, java.util.concurrent.TimeUnit.SECONDS,
+                new java.util.concurrent.LinkedBlockingQueue<>(),
+                runnable -> {
+                    Thread thread = new Thread(runnable, "xadfree-resolver-worker");
+                    thread.setDaemon(true);
+                    return thread;
+                });
     }
 
     /** Called from onPackageReady: installs the short-lived attach observer. */
@@ -640,9 +663,9 @@ class HookCoordinator implements UrtEmitHooks.Listener, RuntimeWitness.Listener,
                 + " runtimeSelfCheck="
                 + ("witnessPromoted".equals(reason) ? "passed" : "pending")
                 + " elapsedMs=" + elapsed();
-        if (transition(State.READY, detail)) {
-            maybeShutdownWorker();
-        }
+        transition(State.READY, detail);
+        // The idle-exit worker lane tears itself down after keepAlive; no
+        // explicit shutdown — future legal events must still be servable.
     }
 
     private void degrade(String reason) {
@@ -664,7 +687,6 @@ class HookCoordinator implements UrtEmitHooks.Listener, RuntimeWitness.Listener,
                 } catch (Throwable ignored) {
                 }
             }
-            maybeShutdownWorker();
         }
     }
 
@@ -703,16 +725,6 @@ class HookCoordinator implements UrtEmitHooks.Listener, RuntimeWitness.Listener,
         return sessionStartElapsed == 0L ? -1L : clock.getAsLong() - sessionStartElapsed;
     }
 
-    /** The worker survives hooks: witness events arrive long after READY. */
-    private void maybeShutdownWorker() {
-        if (!emitHooks.hasInstalled() && activeWitness == null) {
-            try {
-                worker.shutdown();
-            } catch (Throwable ignored) {
-            }
-        }
-    }
-
     // ------------------------------------------------------------------
     // Event plumbing
     // ------------------------------------------------------------------
@@ -732,9 +744,8 @@ class HookCoordinator implements UrtEmitHooks.Listener, RuntimeWitness.Listener,
                 }
             });
         } catch (Throwable rejected) {
-            // Worker already shut down: no hooks or witness remain, so only
-            // diagnostics would have run here.
-            log.info("event dropped workerShutdown what=" + what);
+            // Defensive only: the idle-exit pool is never shut down.
+            log.info("event dropped executorRejected what=" + what);
         }
     }
 
@@ -769,6 +780,14 @@ class HookCoordinator implements UrtEmitHooks.Listener, RuntimeWitness.Listener,
 
     RuntimeWitness activeWitnessForTests() {
         return activeWitness;
+    }
+
+    /** Live worker threads of the serial lane (0 after idle exit). */
+    int workerPoolSizeForTests() {
+        if (worker instanceof java.util.concurrent.ThreadPoolExecutor) {
+            return ((java.util.concurrent.ThreadPoolExecutor) worker).getPoolSize();
+        }
+        return -1;
     }
 
     /** Blocks until every queued worker event has run. */

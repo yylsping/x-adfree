@@ -1,7 +1,9 @@
 package io.github.yylsping.xadfree;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import org.json.JSONObject;
@@ -97,6 +99,65 @@ public final class XTargetIdentityTest {
         byte[] bytes = XTargetIdentity.signingCertificateBytes(null);
         assertEquals(XTargetIdentity.sha256("unavailable".getBytes(
                 java.nio.charset.StandardCharsets.UTF_8)), XTargetIdentity.sha256(bytes));
+    }
+
+    // ------------------------------------------------------------------
+    // P2-1 (2.0.2): signer-set selection semantics
+    // ------------------------------------------------------------------
+
+    private static final byte[][] CERTS_A = {{1}, {2}, {3}};
+    private static final byte[][] CERTS_B = {{9}};
+
+    @Test
+    public void multipleSignersUseCurrentApkContents() {
+        byte[][] selected = XTargetIdentity.selectSigners(true, CERTS_A, CERTS_B);
+        assertSame(CERTS_B, selected);
+    }
+
+    @Test
+    public void singleSignerPrefersRotationHistory() {
+        byte[][] selected = XTargetIdentity.selectSigners(false, CERTS_A, CERTS_B);
+        assertSame(CERTS_A, selected);
+    }
+
+    @Test
+    public void singleSignerWithoutHistoryFallsBackToContents() {
+        byte[][] selected = XTargetIdentity.selectSigners(false, null, CERTS_B);
+        assertSame(CERTS_B, selected);
+        byte[][] emptyHistory = XTargetIdentity.selectSigners(false, new byte[0][], CERTS_B);
+        assertSame(CERTS_B, emptyHistory);
+    }
+
+    @Test
+    public void combineCertificatesIsOrderIndependentAndStable() {
+        byte[] left = XTargetIdentity.combineCertificates(new byte[][]{{1, 2}, {3}});
+        byte[] right = XTargetIdentity.combineCertificates(new byte[][]{{3}, {1, 2}});
+        assertArrayEquals(left, right);
+
+        byte[] again = XTargetIdentity.combineCertificates(new byte[][]{{3}, {1, 2}});
+        assertArrayEquals(left, again);
+    }
+
+    @Test
+    public void combineCertificatesDropsEmptyEntriesAndHandlesEmpty() {
+        byte[] combined = XTargetIdentity.combineCertificates(new byte[][]{{5}, null, new byte[0]});
+        assertArrayEquals(new byte[]{5}, combined);
+
+        byte[] empty = XTargetIdentity.combineCertificates(new byte[0][]);
+        byte[] allNull = XTargetIdentity.combineCertificates(new byte[][]{null, new byte[0]});
+        // Both degrade to the explicit unavailable marker, never to a
+        // disguised digest of nothing.
+        assertArrayEquals("unavailable".getBytes(java.nio.charset.StandardCharsets.UTF_8), empty);
+        assertArrayEquals(empty, allNull);
+    }
+
+    @Test
+    public void signerSetChangeChangesDigest() {
+        String one = XTargetIdentity.sha256(
+                XTargetIdentity.combineCertificates(new byte[][]{{1}, {2}}));
+        String two = XTargetIdentity.sha256(
+                XTargetIdentity.combineCertificates(new byte[][]{{1}, {9}}));
+        assertFalse(one.equals(two));
     }
 
     @Test

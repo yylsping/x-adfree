@@ -21,7 +21,7 @@ An LSPosed ad-removal module for the X Android app, built with libxposed Modern 
 | Target app | X 12.x series; verified on 12.3.1 and 12.17.0-release.0. Not bound to a single version — ordinary minor versions are adapted at runtime |
 | Android | Android 9.0 (API 28) or later |
 | Framework | Official LSPosed with libxposed Modern API 102 support |
-| Module version | 2.0.1 (versionCode 20) |
+| Module version | 2.0.2 (versionCode 21) |
 
 The module resolves its targets through feature fingerprints, shape verification, and a runtime witness instead of hard-coded class tables. **Engineering definition of "minor-version agnostic"**: ordinary X minor upgrades need no per-version hook table; while business semantics and call structure remain recognizable, runtime DexKit + Verifier + Witness relocate targets automatically; a generational redesign may require re-analysis and a Resolver update. Zero-maintenance compatibility with arbitrary future versions is not promised. If a future X refactor invalidates every fingerprint, the module fails open — X keeps working unfiltered — until an updated module release.
 

@@ -20,6 +20,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * happens on the coordinator worker via the listener callbacks. Replacement
  * lists are plain {@code ArrayList}; any other incoming List implementation
  * is passed through unfiltered (fail-open) and its class name logged once.
+ *
+ * <p>Concurrency (2.0.2): the hook may fire on arbitrary coroutine
+ * dispatcher threads. Per-hook {@link WitnessState} guards its counters and
+ * passed/dead flags with a minimal synchronized block; payload reflection,
+ * logging, unhooking and listener notifications run outside it, and each
+ * notification fires exactly once on its state transition.
  */
 final class UrtEmitHooks {
     interface Listener {
@@ -182,51 +188,91 @@ final class UrtEmitHooks {
             this.descriptor = descriptor;
         }
 
-        /** @return true when filtering is allowed for this invocation. */
+        /**
+         * One observed invocation (P1-2 concurrency): the shape probe runs
+         * outside the lock (it reflects on payload elements); counters and
+         * the passed/dead transitions happen inside a minimal synchronized
+         * block; logging, unhooking and listener notifications happen after
+         * releasing it. Notifications are exactly-once because each fires
+         * only on its false→true state transition under the lock.
+         *
+         * @return true when filtering is allowed for this invocation.
+         */
         boolean sample(List<?> incoming) {
-            if (dead) {
-                return false;
+            // Fast paths read shared flags under the same lock (visibility).
+            boolean allowFiltering;
+            boolean notifyPassed = false;
+            String failReason = null;
+            int failuresForLog = 0;
+            Object evidenceElement = null;
+            synchronized (this) {
+                if (dead) {
+                    return false;
+                }
+                if (passed) {
+                    return true;
+                }
+                allowFiltering = false;
             }
-            if (passed) {
-                return true;
-            }
-            Object evidenceElement = firstShapedElement(incoming);
+            // Outside the lock: reflection over payload elements.
+            evidenceElement = firstShapedElement(incoming);
             WitnessLogic.Decision decision = WitnessLogic.onInvocation(
                     true, incoming, evidenceElement != null);
-            if (decision == WitnessLogic.Decision.PASSED) {
-                passed = true;
+            synchronized (this) {
+                if (dead) {
+                    return false;
+                }
+                if (passed) {
+                    return true;
+                }
+                if (decision == WitnessLogic.Decision.PASSED) {
+                    passed = true;
+                    notifyPassed = true;
+                    allowFiltering = true;
+                } else if (decision == WitnessLogic.Decision.STRIKE) {
+                    failures++;
+                    failuresForLog = failures;
+                    if (WitnessLogic.limitReached(failures)) {
+                        dead = true;
+                        failReason = "shapeMismatchLimit";
+                    }
+                }
+            }
+            if (notifyPassed) {
                 log.info("witness target=urt_emit state=passed descriptor=" + descriptor
                         + " sample=" + incoming.size()
                         + " elementType=" + evidenceElement.getClass().getName());
                 if (listener != null) {
                     listener.onWitnessPassed(descriptor);
                 }
-                return true;
-            }
-            if (decision == WitnessLogic.Decision.STRIKE) {
-                failures++;
+            } else if (failuresForLog > 0) {
                 log.info("witness target=urt_emit state=mismatch descriptor=" + descriptor
                         + " sample=" + incoming.size()
                         + " element=" + elementDescription(incoming)
-                        + " failures=" + failures);
-                if (WitnessLogic.limitReached(failures)) {
-                    dead = true;
-                    log.info("witness target=urt_emit state=failed descriptor=" + descriptor
-                            + " reason=shapeMismatchLimit unhooked=true");
-                    unhookByWitness(descriptor, "shapeMismatchLimit");
-                }
+                        + " failures=" + failuresForLog);
             }
-            // Not yet witnessed: fail-open, no filtering.
-            return false;
+            if (failReason != null) {
+                log.info("witness target=urt_emit state=failed descriptor=" + descriptor
+                        + " reason=" + failReason + " unhooked=true");
+                unhookByWitness(descriptor, failReason);
+            }
+            return allowFiltering;
         }
 
+        /** Exactly-once failure path: only the dead false→true transition fires. */
         void failure(String reason) {
-            if (dead) {
-                return;
+            boolean failNow = false;
+            synchronized (this) {
+                if (dead) {
+                    return;
+                }
+                failures++;
+                if (WitnessLogic.limitReached(failures)) {
+                    dead = true;
+                    failNow = true;
+                }
             }
-            failures++;
-            if (WitnessLogic.limitReached(failures)) {
-                dead = true;
+            if (failNow) {
                 log.info("witness target=urt_emit state=failed descriptor=" + descriptor
                         + " reason=" + reason + " unhooked=true");
                 unhookByWitness(descriptor, reason);
